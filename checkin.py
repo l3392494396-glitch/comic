@@ -55,7 +55,8 @@ class NotificationError(CheckinError):
 @dataclass(frozen=True)
 class Config:
     username: str
-    password: str
+    password: str = ""
+    cookie: str = ""
     base_url: str = DEFAULT_BASE_URL
     timeout: float = DEFAULT_TIMEOUT_SECONDS
 
@@ -64,12 +65,15 @@ class Config:
         values = os.environ if env is None else env
         username = values.get("JM_USERNAME", "").strip()
         password = values.get("JM_PASSWORD", "")
+        cookie = values.get("JM_COOKIE", "").strip()
         base_url = values.get("JM_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/")
 
         if not username:
             raise ConfigError("缺少环境变量 JM_USERNAME")
-        if not password:
-            raise ConfigError("缺少环境变量 JM_PASSWORD")
+        if not cookie and not password:
+            raise ConfigError("JM_COOKIE 和 JM_PASSWORD 至少需要配置一个")
+        if "\r" in cookie or "\n" in cookie:
+            raise ConfigError("JM_COOKIE 不能包含换行符")
 
         parsed = urlparse(base_url)
         if parsed.scheme != "https" or not parsed.netloc:
@@ -86,6 +90,7 @@ class Config:
         return cls(
             username=username,
             password=password,
+            cookie=cookie,
             base_url=base_url,
             timeout=timeout,
         )
@@ -245,6 +250,8 @@ class ComicClient:
             headers["Origin"] = self.config.base_url
         if ajax:
             headers["X-Requested-With"] = "XMLHttpRequest"
+        if self.config.cookie:
+            headers["Cookie"] = self.config.cookie
 
         try:
             response = self.session.request(
@@ -337,9 +344,12 @@ def _print_tasks(label: str, tasks: Mapping[str, TaskProgress]) -> None:
 
 def run(config: Config) -> tuple[dict[str, TaskProgress], dict[str, TaskProgress]]:
     client = ComicClient(config)
-    print(f"正在登录账号：{config.username}")
-    client.login()
-    print("登录成功")
+    if config.cookie:
+        print(f"正在使用 Cookie 验证账号：{config.username}")
+    else:
+        print(f"正在登录账号：{config.username}")
+        client.login()
+        print("登录成功")
 
     coin_tasks = client.fetch_tasks("coin")
     exp_tasks = client.fetch_tasks("exp")

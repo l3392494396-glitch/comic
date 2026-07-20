@@ -31,11 +31,16 @@ comic/
 
 1. 进入 `Settings` → `Secrets and variables` → `Actions`。
 2. 新建 Repository secret：`JM_USERNAME`，值为网站用户名。
-3. 新建 Repository secret：`JM_PASSWORD`，值为网站密码。
-4. 登录 [PushPlus](https://www.pushplus.plus/)，复制你的用户 Token 或消息 Token。
-5. 新建 Repository secret：`PUSHPLUS_TOKEN`，值为刚复制的 Token。
-6. 进入 `Actions`，选择 `Daily comic check-in`。
-7. 点击 `Run workflow` 手动测试一次。
+3. 推荐新建 Repository secret：`JM_COOKIE`，值为已登录网页请求中的完整
+   `Cookie` 请求头（只复制冒号后面的值）。配置后会优先使用 Cookie 登录。
+4. 如果不使用 Cookie，则新建 Repository secret：`JM_PASSWORD`，值为网站密码。
+5. 登录 [PushPlus](https://www.pushplus.plus/)，复制你的用户 Token 或消息 Token。
+6. 新建 Repository secret：`PUSHPLUS_TOKEN`，值为刚复制的 Token。
+7. 进入 `Actions`，选择 `Daily comic check-in`。
+8. 点击 `Run workflow` 手动测试一次。
+
+`JM_COOKIE` 与密码具有同等敏感性，不要写进代码、README、工作流或 Actions 日志。
+如果 Cookie 失效，需要从已登录的网页重新复制并更新 Secret。
 
 每次运行都会发送一条 Markdown 格式的 PushPlus 通知，内容包括签到是否成功以及
 金币、经验任务进度。Token 不要写进代码或工作流文件。
@@ -51,7 +56,7 @@ PowerShell：
 cd comic
 python -m unittest discover -s tests -v
 $env:JM_USERNAME = "你的用户名"
-$env:JM_PASSWORD = "你的密码"
+$env:JM_COOKIE = "AVS=你的登录Cookie; 其他Cookie=值"
 $env:PUSHPLUS_TOKEN = "你的 PushPlus Token"
 python checkin.py
 ```

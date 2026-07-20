@@ -74,6 +74,19 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Config.from_env({"JM_USERNAME": "alice"})
 
+    def test_accepts_cookie_without_password(self):
+        config = Config.from_env(
+            {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=session-value"}
+        )
+        self.assertEqual(config.password, "")
+        self.assertEqual(config.cookie, "AVS=session-value")
+
+    def test_rejects_cookie_with_newline(self):
+        with self.assertRaisesRegex(ConfigError, "换行符"):
+            Config.from_env(
+                {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=value\r\nevil=1"}
+            )
+
     def test_rejects_non_https_base_url(self):
         with self.assertRaises(ConfigError):
             Config.from_env(
@@ -145,6 +158,24 @@ class ClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CheckinError, "GitHub Actions"):
             client.login()
+
+    def test_sends_cookie_when_fetching_tasks(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    ParserTests.HTML,
+                    url="https://18comic.ink/user/alice/achievements?type=coin",
+                )
+            ]
+        )
+        config = Config(username="alice", cookie="AVS=session-value")
+        client = ComicClient(config, session=session)
+
+        tasks = client.fetch_tasks("coin")
+
+        _, _, kwargs = session.requests[0]
+        self.assertEqual(kwargs["headers"]["Cookie"], "AVS=session-value")
+        self.assertTrue(tasks["每日登入"].completed)
 
 
 class PushPlusTests(unittest.TestCase):
