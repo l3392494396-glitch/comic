@@ -2,7 +2,7 @@ name: Daily comic check-in
 
 "on":
   schedule:
-    # 北京时间每天 00:17 运行
+    # GitHub cron uses UTC. 16:17 UTC = 00:17 Asia/Shanghai.
     - cron: "17 16 * * *"
   workflow_dispatch:
 
@@ -27,6 +27,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install dependencies
+        run: python -m pip install --requirement requirements.txt
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
@@ -34,6 +37,7 @@ jobs:
         env:
           JM_USERNAME: ${{ secrets.JM_USERNAME }}
           JM_PASSWORD: ${{ secrets.JM_PASSWORD }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           JM_BASE_URL: ${{ vars.JM_BASE_URL || 'https://18comic.ink' }}
           PYTHONUNBUFFERED: "1"
         run: python checkin.py
