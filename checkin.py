@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Log in to 18comic and verify the daily-login achievements.
+"""Verify 18comic daily-login achievements with an existing login cookie.
 
-Credentials are read only from environment variables so they can be supplied by
-GitHub Actions encrypted secrets.  This script intentionally does not automate
-advertisement clicks, comments, replies, uploads, or public likes.
+The cookie is read only from an environment variable so it can be supplied by
+GitHub Actions encrypted secrets. This script never submits an account password
+and intentionally does not automate advertisements, comments, uploads, or likes.
 """
 
 from __future__ import annotations
@@ -40,10 +40,6 @@ class ConfigError(CheckinError):
     """Raised when required environment configuration is missing or unsafe."""
 
 
-class LoginError(CheckinError):
-    """Raised when the website rejects or cannot process a login."""
-
-
 class VerificationError(CheckinError):
     """Raised when the daily-login task cannot be verified."""
 
@@ -52,11 +48,22 @@ class NotificationError(CheckinError):
     """Raised when PushPlus does not accept a notification request."""
 
 
+def _normalize_avs_cookie(raw_cookie: str) -> str:
+    """Keep only the authentication cookie and discard tracking/remember data."""
+    if "\r" in raw_cookie or "\n" in raw_cookie:
+        raise ConfigError("JM_COOKIE 不能包含换行符")
+
+    for part in raw_cookie.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name == "AVS" and value:
+            return f"AVS={value.strip()}"
+    raise ConfigError("JM_COOKIE 中缺少有效的 AVS Cookie")
+
+
 @dataclass(frozen=True)
 class Config:
     username: str
-    password: str = ""
-    cookie: str = ""
+    cookie: str
     base_url: str = DEFAULT_BASE_URL
     timeout: float = DEFAULT_TIMEOUT_SECONDS
 
@@ -64,16 +71,14 @@ class Config:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
         values = os.environ if env is None else env
         username = values.get("JM_USERNAME", "").strip()
-        password = values.get("JM_PASSWORD", "")
-        cookie = values.get("JM_COOKIE", "").strip()
+        raw_cookie = values.get("JM_COOKIE", "").strip()
         base_url = values.get("JM_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/")
 
         if not username:
             raise ConfigError("缺少环境变量 JM_USERNAME")
-        if not cookie and not password:
-            raise ConfigError("JM_COOKIE 和 JM_PASSWORD 至少需要配置一个")
-        if "\r" in cookie or "\n" in cookie:
-            raise ConfigError("JM_COOKIE 不能包含换行符")
+        if not raw_cookie:
+            raise ConfigError("缺少环境变量 JM_COOKIE")
+        cookie = _normalize_avs_cookie(raw_cookie)
 
         parsed = urlparse(base_url)
         if parsed.scheme != "https" or not parsed.netloc:
@@ -89,7 +94,6 @@ class Config:
 
         return cls(
             username=username,
-            password=password,
             cookie=cookie,
             base_url=base_url,
             timeout=timeout,
@@ -230,34 +234,19 @@ class ComicClient:
         self.config = config
         self.session = session or curl_requests.Session(impersonate="chrome")
 
-    def _request(
-        self,
-        path: str,
-        *,
-        form: Mapping[str, str] | None = None,
-        ajax: bool = False,
-    ) -> HttpResult:
+    def _request(self, path: str) -> HttpResult:
         url = urljoin(f"{self.config.base_url}/", path.lstrip("/"))
         headers = {
-            "Accept": "application/json, text/javascript, */*; q=0.01"
-            if ajax
-            else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
-            "Referer": f"{self.config.base_url}/login",
+            "Referer": f"{self.config.base_url}/",
+            "Cookie": self.config.cookie,
         }
-        if form is not None:
-            headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
-            headers["Origin"] = self.config.base_url
-        if ajax:
-            headers["X-Requested-With"] = "XMLHttpRequest"
-        if self.config.cookie:
-            headers["Cookie"] = self.config.cookie
 
         try:
             response = self.session.request(
-                "POST" if form is not None else "GET",
+                "GET",
                 url,
-                data=form,
                 headers=headers,
                 timeout=self.config.timeout,
                 allow_redirects=True,
@@ -283,37 +272,6 @@ class ComicClient:
             raise CheckinError(f"网站返回 HTTP {status}: {url}{suffix}{hint}")
 
         return HttpResult(status=status, url=str(response.url), body=body)
-
-    def login(self) -> None:
-        result = self._request(
-            "/login",
-            form={
-                "username": self.config.username,
-                "password": self.config.password,
-                "id_remember": "on",
-                "login_remember": "on",
-                "submit_login": "1",
-            },
-            ajax=True,
-        )
-
-        try:
-            payload = json.loads(result.body)
-        except json.JSONDecodeError as exc:
-            raise LoginError(
-                "登录接口没有返回 JSON；站点可能正在维护或触发了风控"
-            ) from exc
-
-        try:
-            status = int(payload.get("status", -1))
-        except (TypeError, ValueError):
-            status = -1
-
-        if status != 1:
-            message = str(payload.get("errors") or payload.get("msg") or "未知错误")
-            if status == 5:
-                message = f"账户被冻结，需要在网页中人工处理：{message}"
-            raise LoginError(f"登录失败：{message[:300]}")
 
     def fetch_tasks(self, reward_type: str) -> dict[str, TaskProgress]:
         if reward_type not in {"coin", "exp"}:
@@ -344,12 +302,7 @@ def _print_tasks(label: str, tasks: Mapping[str, TaskProgress]) -> None:
 
 def run(config: Config) -> tuple[dict[str, TaskProgress], dict[str, TaskProgress]]:
     client = ComicClient(config)
-    if config.cookie:
-        print(f"正在使用 Cookie 验证账号：{config.username}")
-    else:
-        print(f"正在登录账号：{config.username}")
-        client.login()
-        print("登录成功")
+    print(f"正在使用 Cookie 验证账号：{config.username}")
 
     coin_tasks = client.fetch_tasks("coin")
     exp_tasks = client.fetch_tasks("exp")

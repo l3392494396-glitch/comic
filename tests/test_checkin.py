@@ -6,7 +6,6 @@ from checkin import (
     ComicClient,
     Config,
     ConfigError,
-    LoginError,
     NotificationError,
     TaskProgress,
     parse_task_progress,
@@ -65,21 +64,30 @@ class FakeSession:
 class ConfigTests(unittest.TestCase):
     def test_reads_required_values(self):
         config = Config.from_env(
-            {"JM_USERNAME": "alice", "JM_PASSWORD": "secret"}
+            {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=session-value"}
         )
         self.assertEqual(config.username, "alice")
+        self.assertEqual(config.cookie, "AVS=session-value")
         self.assertEqual(config.base_url, "https://18comic.ink")
 
-    def test_rejects_missing_password(self):
+    def test_rejects_missing_cookie(self):
         with self.assertRaises(ConfigError):
             Config.from_env({"JM_USERNAME": "alice"})
 
-    def test_accepts_cookie_without_password(self):
+    def test_keeps_only_avs_from_full_cookie_header(self):
         config = Config.from_env(
-            {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=session-value"}
+            {
+                "JM_USERNAME": "alice",
+                "JM_COOKIE": "theme=light; AVS=session-value; remember=secret",
+            }
         )
-        self.assertEqual(config.password, "")
         self.assertEqual(config.cookie, "AVS=session-value")
+
+    def test_rejects_cookie_without_avs(self):
+        with self.assertRaisesRegex(ConfigError, "AVS"):
+            Config.from_env(
+                {"JM_USERNAME": "alice", "JM_COOKIE": "theme=light"}
+            )
 
     def test_rejects_cookie_with_newline(self):
         with self.assertRaisesRegex(ConfigError, "换行符"):
@@ -92,7 +100,7 @@ class ConfigTests(unittest.TestCase):
             Config.from_env(
                 {
                     "JM_USERNAME": "alice",
-                    "JM_PASSWORD": "secret",
+                    "JM_COOKIE": "AVS=session-value",
                     "JM_BASE_URL": "http://example.com",
                 }
             )
@@ -122,33 +130,7 @@ class ParserTests(unittest.TestCase):
 
 class ClientTests(unittest.TestCase):
     def setUp(self):
-        self.config = Config(username="alice", password="secret")
-
-    def test_login_posts_expected_form(self):
-        session = FakeSession(
-            [FakeResponse(json.dumps({"status": 1, "errors": "/"}))]
-        )
-        client = ComicClient(self.config, session=session)
-
-        client.login()
-
-        method, url, kwargs = session.requests[0]
-        posted = kwargs["data"]
-        self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://18comic.ink/login")
-        self.assertEqual(posted["username"], "alice")
-        self.assertEqual(posted["password"], "secret")
-        self.assertEqual(posted["submit_login"], "1")
-        self.assertEqual(kwargs["timeout"], 30.0)
-
-    def test_login_rejects_error_response(self):
-        session = FakeSession(
-            [FakeResponse(json.dumps({"status": 2, "errors": "bad login"}))]
-        )
-        client = ComicClient(self.config, session=session)
-
-        with self.assertRaisesRegex(LoginError, "bad login"):
-            client.login()
+        self.config = Config(username="alice", cookie="AVS=session-value")
 
     def test_reports_403_diagnostics(self):
         response = FakeResponse("Restricted Access!", status=403)
@@ -157,7 +139,7 @@ class ClientTests(unittest.TestCase):
         client = ComicClient(self.config, session=session)
 
         with self.assertRaisesRegex(CheckinError, "GitHub Actions"):
-            client.login()
+            client.fetch_tasks("coin")
 
     def test_sends_cookie_when_fetching_tasks(self):
         session = FakeSession(
