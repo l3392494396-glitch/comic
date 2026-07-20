@@ -2,7 +2,7 @@ name: Daily comic check-in
 
 "on":
   schedule:
-    # GitHub cron uses UTC. 16:17 UTC = 00:17 Asia/Shanghai.
+    # 北京时间每天 00:17 运行
     - cron: "17 16 * * *"
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
       - name: Run daily check-in
         env:
           JM_USERNAME: ${{ secrets.JM_USERNAME }}
-          JM_PASSWORD: ${{ secrets.JM_PASSWORD }}
+          JM_COOKIE: ${{ secrets.JM_COOKIE }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           JM_BASE_URL: ${{ vars.JM_BASE_URL || 'https://18comic.ink' }}
           PYTHONUNBUFFERED: "1"
