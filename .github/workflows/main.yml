@@ -1,0 +1,39 @@
+name: Daily comic check-in
+
+"on":
+  schedule:
+    # 北京时间每天 00:17 运行
+    - cron: "17 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: comic-daily-checkin
+  cancel-in-progress: false
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run daily check-in
+        env:
+          JM_USERNAME: ${{ secrets.JM_USERNAME }}
+          JM_PASSWORD: ${{ secrets.JM_PASSWORD }}
+          JM_BASE_URL: ${{ vars.JM_BASE_URL || 'https://18comic.ink' }}
+          PYTHONUNBUFFERED: "1"
+        run: python checkin.py
