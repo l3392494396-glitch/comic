@@ -9,11 +9,12 @@
 
 ```text
 comic/
-├── .github/workflows/daily-checkin.yml
+├── .github/workflows/main.yml
 ├── tests/test_checkin.py
 ├── .env.example
 ├── .gitignore
 ├── checkin.py
+├── requirements.txt
 └── README.md
 ```
 
@@ -31,8 +32,13 @@ comic/
 1. 进入 `Settings` → `Secrets and variables` → `Actions`。
 2. 新建 Repository secret：`JM_USERNAME`，值为网站用户名。
 3. 新建 Repository secret：`JM_PASSWORD`，值为网站密码。
-4. 进入 `Actions`，选择 `Daily comic check-in`。
-5. 点击 `Run workflow` 手动测试一次。
+4. 登录 [PushPlus](https://www.pushplus.plus/)，复制你的用户 Token 或消息 Token。
+5. 新建 Repository secret：`PUSHPLUS_TOKEN`，值为刚复制的 Token。
+6. 进入 `Actions`，选择 `Daily comic check-in`。
+7. 点击 `Run workflow` 手动测试一次。
+
+每次运行都会发送一条 Markdown 格式的 PushPlus 通知，内容包括签到是否成功以及
+金币、经验任务进度。Token 不要写进代码或工作流文件。
 
 工作流默认每天 `16:17 UTC` 运行，对应中国标准时间次日 `00:17`。GitHub 的定时
 任务可能有少量延迟，因此没有把时间设在整点。
@@ -46,6 +52,7 @@ cd comic
 python -m unittest discover -s tests -v
 $env:JM_USERNAME = "你的用户名"
 $env:JM_PASSWORD = "你的密码"
+$env:PUSHPLUS_TOKEN = "你的 PushPlus Token"
 python checkin.py
 ```
 
@@ -55,7 +62,12 @@ python checkin.py
 Remove-Item Env:JM_PASSWORD
 ```
 
-项目只使用 Python 标准库，不需要安装第三方依赖。
+项目使用 `curl_cffi` 模拟 Chrome 的 TLS/HTTP2 请求指纹，以降低站点将 GitHub
+Actions 请求误判为爬虫并返回 HTTP 403 的概率。安装依赖：
+
+```powershell
+python -m pip install --requirement requirements.txt
+```
 
 ## 常见失败
 

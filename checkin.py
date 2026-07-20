@@ -15,15 +15,17 @@ import ssl
 import sys
 from dataclasses import dataclass
 from html import unescape
-from http.cookiejar import CookieJar
 from typing import Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urljoin, urlparse
-from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
+from urllib.parse import quote, urljoin, urlparse
+from urllib.request import HTTPSHandler, Request, build_opener
+
+from curl_cffi import requests as curl_requests
 
 
 DEFAULT_BASE_URL = "https://18comic.ink"
 DEFAULT_TIMEOUT_SECONDS = 30.0
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/138.0 Safari/537.36"
@@ -44,6 +46,10 @@ class LoginError(CheckinError):
 
 class VerificationError(CheckinError):
     """Raised when the daily-login task cannot be verified."""
+
+
+class NotificationError(CheckinError):
+    """Raised when PushPlus does not accept a notification request."""
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,69 @@ class TaskProgress:
         return f"{self.current}/{self.total}"
 
 
+def send_pushplus(
+    token: str,
+    title: str,
+    content: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    opener=None,
+) -> str:
+    """Submit a Markdown notification to PushPlus and return its message ID."""
+    if not token.strip():
+        raise NotificationError("缺少环境变量 PUSHPLUS_TOKEN")
+
+    payload = json.dumps(
+        {
+            "token": token.strip(),
+            "title": title,
+            "content": content,
+            "template": "markdown",
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        PUSHPLUS_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json; charset=UTF-8",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+
+    if opener is None:
+        opener = build_opener(HTTPSHandler(context=ssl.create_default_context()))
+
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            raw_body = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+            body = raw_body.decode(charset, errors="replace")
+    except HTTPError as exc:
+        raise NotificationError(f"PushPlus 返回 HTTP {exc.code}") from exc
+    except URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        raise NotificationError(f"无法连接 PushPlus：{reason}") from exc
+    except TimeoutError as exc:
+        raise NotificationError(f"访问 PushPlus 超时（{timeout:g} 秒）") from exc
+
+    try:
+        response_payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise NotificationError("PushPlus 没有返回有效的 JSON") from exc
+
+    try:
+        code = int(response_payload.get("code", -1))
+    except (AttributeError, TypeError, ValueError):
+        code = -1
+    if code != 200:
+        message = str(response_payload.get("msg", "未知错误"))
+        raise NotificationError(f"PushPlus 拒绝了请求：{message[:300]}")
+
+    return str(response_payload.get("data", ""))
+
+
 def _plain_text(fragment: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", fragment)
     return " ".join(unescape(without_tags).split())
@@ -152,16 +221,9 @@ def parse_task_progress(page_html: str) -> dict[str, TaskProgress]:
 
 
 class ComicClient:
-    def __init__(self, config: Config, opener=None) -> None:
+    def __init__(self, config: Config, session=None) -> None:
         self.config = config
-        self.cookies = CookieJar()
-        if opener is None:
-            ssl_context = ssl.create_default_context()
-            opener = build_opener(
-                HTTPCookieProcessor(self.cookies),
-                HTTPSHandler(context=ssl_context),
-            )
-        self.opener = opener
+        self.session = session or curl_requests.Session(impersonate="chrome")
 
     def _request(
         self,
@@ -171,14 +233,12 @@ class ComicClient:
         ajax: bool = False,
     ) -> HttpResult:
         url = urljoin(f"{self.config.base_url}/", path.lstrip("/"))
-        data = None if form is None else urlencode(form).encode("utf-8")
         headers = {
             "Accept": "application/json, text/javascript, */*; q=0.01"
             if ajax
             else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
             "Referer": f"{self.config.base_url}/login",
-            "User-Agent": USER_AGENT,
         }
         if form is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
@@ -186,30 +246,36 @@ class ComicClient:
         if ajax:
             headers["X-Requested-With"] = "XMLHttpRequest"
 
-        request = Request(
-            url,
-            data=data,
-            headers=headers,
-            method="POST" if form is not None else "GET",
-        )
-
         try:
-            with self.opener.open(request, timeout=self.config.timeout) as response:
-                raw_body = response.read()
-                charset = response.headers.get_content_charset() or "utf-8"
-                body = raw_body.decode(charset, errors="replace")
-                return HttpResult(
-                    status=getattr(response, "status", 200),
-                    url=response.geturl(),
-                    body=body,
-                )
-        except HTTPError as exc:
-            raise CheckinError(f"网站返回 HTTP {exc.code}: {url}") from exc
-        except URLError as exc:
-            reason = getattr(exc, "reason", exc)
-            raise CheckinError(f"无法连接网站: {reason}") from exc
-        except TimeoutError as exc:
-            raise CheckinError(f"访问网站超时（{self.config.timeout:g} 秒）") from exc
+            response = self.session.request(
+                "POST" if form is not None else "GET",
+                url,
+                data=form,
+                headers=headers,
+                timeout=self.config.timeout,
+                allow_redirects=True,
+            )
+        except curl_requests.RequestsError as exc:
+            raise CheckinError(f"无法连接网站：{exc}") from exc
+
+        status = int(response.status_code)
+        body = response.text
+        if status >= 400:
+            details = []
+            server = response.headers.get("server", "").strip()
+            challenge = response.headers.get("cf-mitigated", "").strip()
+            snippet = _plain_text(body)[:160]
+            if server:
+                details.append(f"server={server}")
+            if challenge:
+                details.append(f"cf-mitigated={challenge}")
+            if snippet:
+                details.append(f"响应={snippet}")
+            suffix = f"（{'；'.join(details)}）" if details else ""
+            hint = "；站点可能限制了 GitHub Actions 的 IP 或识别出自动请求" if status == 403 else ""
+            raise CheckinError(f"网站返回 HTTP {status}: {url}{suffix}{hint}")
+
+        return HttpResult(status=status, url=str(response.url), body=body)
 
     def login(self) -> None:
         result = self._request(
@@ -269,7 +335,7 @@ def _print_tasks(label: str, tasks: Mapping[str, TaskProgress]) -> None:
         print(f"  {marker} {name}: {progress}")
 
 
-def run(config: Config) -> None:
+def run(config: Config) -> tuple[dict[str, TaskProgress], dict[str, TaskProgress]]:
     client = ComicClient(config)
     print(f"正在登录账号：{config.username}")
     client.login()
@@ -290,21 +356,66 @@ def run(config: Config) -> None:
             )
 
     print("每日登录任务已在金币和经验页面完成。")
+    return coin_tasks, exp_tasks
+
+
+def _notification_content(
+    username: str,
+    coin_tasks: Mapping[str, TaskProgress],
+    exp_tasks: Mapping[str, TaskProgress],
+) -> str:
+    lines = [f"账号：`{username}`", "", "## 金币任务"]
+    for name, progress in coin_tasks.items():
+        marker = "✅" if progress.completed else "▫️"
+        lines.append(f"- {marker} {name}：{progress}")
+
+    lines.extend(["", "## 经验任务"])
+    for name, progress in exp_tasks.items():
+        marker = "✅" if progress.completed else "▫️"
+        lines.append(f"- {marker} {name}：{progress}")
+    return "\n".join(lines)
 
 
 def main() -> int:
+    token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+    username = os.environ.get("JM_USERNAME", "").strip() or "未配置"
+    exit_code = 0
+    title = "[comic] 每日签到成功"
+    content = ""
+
     try:
-        run(Config.from_env())
+        config = Config.from_env()
+        coin_tasks, exp_tasks = run(config)
+        content = _notification_content(config.username, coin_tasks, exp_tasks)
     except ConfigError as exc:
-        print(f"配置错误：{exc}", file=sys.stderr)
-        return 2
+        message = f"配置错误：{exc}"
+        print(message, file=sys.stderr)
+        title = "[comic] 每日签到失败"
+        content = f"账号：`{username}`\n\n{message}"
+        exit_code = 2
     except CheckinError as exc:
-        print(f"签到失败：{exc}", file=sys.stderr)
-        return 1
+        message = f"签到失败：{exc}"
+        print(message, file=sys.stderr)
+        title = "[comic] 每日签到失败"
+        content = f"账号：`{username}`\n\n{message}"
+        exit_code = 1
     except Exception as exc:  # Defensive boundary for useful Actions logs.
-        print(f"签到发生未预期错误：{type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        message = f"签到发生未预期错误：{type(exc).__name__}: {exc}"
+        print(message, file=sys.stderr)
+        title = "[comic] 每日签到失败"
+        content = f"账号：`{username}`\n\n{message}"
+        exit_code = 1
+
+    try:
+        message_id = send_pushplus(token, title, content)
+        suffix = f"，消息流水号：{message_id}" if message_id else ""
+        print(f"PushPlus 推送请求已提交{suffix}")
+    except NotificationError as exc:
+        print(f"PushPlus 推送失败：{exc}", file=sys.stderr)
+        if exit_code == 0:
+            exit_code = 1
+
+    return exit_code
 
 
 if __name__ == "__main__":

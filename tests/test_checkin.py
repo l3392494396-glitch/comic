@@ -1,14 +1,16 @@
 import json
 import unittest
-from urllib.parse import parse_qs
 
 from checkin import (
+    CheckinError,
     ComicClient,
     Config,
     ConfigError,
     LoginError,
+    NotificationError,
     TaskProgress,
     parse_task_progress,
+    send_pushplus,
 )
 
 
@@ -22,6 +24,9 @@ class FakeResponse:
         self._body = body.encode("utf-8")
         self._url = url
         self.status = status
+        self.status_code = status
+        self.url = url
+        self.text = body
         self.headers = FakeHeaders()
 
     def read(self):
@@ -44,6 +49,16 @@ class FakeOpener:
 
     def open(self, request, timeout):
         self.requests.append((request, timeout))
+        return self.responses.pop(0)
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def request(self, method, url, **kwargs):
+        self.requests.append((method, url, kwargs))
         return self.responses.pop(0)
 
 
@@ -97,29 +112,69 @@ class ClientTests(unittest.TestCase):
         self.config = Config(username="alice", password="secret")
 
     def test_login_posts_expected_form(self):
-        opener = FakeOpener(
+        session = FakeSession(
             [FakeResponse(json.dumps({"status": 1, "errors": "/"}))]
         )
-        client = ComicClient(self.config, opener=opener)
+        client = ComicClient(self.config, session=session)
 
         client.login()
 
-        request, timeout = opener.requests[0]
-        posted = parse_qs(request.data.decode("utf-8"))
-        self.assertEqual(request.full_url, "https://18comic.ink/login")
-        self.assertEqual(posted["username"], ["alice"])
-        self.assertEqual(posted["password"], ["secret"])
-        self.assertEqual(posted["submit_login"], ["1"])
-        self.assertEqual(timeout, 30.0)
+        method, url, kwargs = session.requests[0]
+        posted = kwargs["data"]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://18comic.ink/login")
+        self.assertEqual(posted["username"], "alice")
+        self.assertEqual(posted["password"], "secret")
+        self.assertEqual(posted["submit_login"], "1")
+        self.assertEqual(kwargs["timeout"], 30.0)
 
     def test_login_rejects_error_response(self):
-        opener = FakeOpener(
+        session = FakeSession(
             [FakeResponse(json.dumps({"status": 2, "errors": "bad login"}))]
         )
-        client = ComicClient(self.config, opener=opener)
+        client = ComicClient(self.config, session=session)
 
         with self.assertRaisesRegex(LoginError, "bad login"):
             client.login()
+
+    def test_reports_403_diagnostics(self):
+        response = FakeResponse("Restricted Access!", status=403)
+        response.headers["server"] = "cloudflare"
+        session = FakeSession([response])
+        client = ComicClient(self.config, session=session)
+
+        with self.assertRaisesRegex(CheckinError, "GitHub Actions"):
+            client.login()
+
+
+class PushPlusTests(unittest.TestCase):
+    def test_posts_markdown_notification(self):
+        opener = FakeOpener(
+            [FakeResponse(json.dumps({"code": 200, "data": "message-id"}))]
+        )
+
+        message_id = send_pushplus(
+            "push-token",
+            "签到成功",
+            "任务已完成",
+            opener=opener,
+        )
+
+        request, timeout = opener.requests[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.full_url, "https://www.pushplus.plus/send")
+        self.assertEqual(payload["token"], "push-token")
+        self.assertEqual(payload["template"], "markdown")
+        self.assertEqual(message_id, "message-id")
+        self.assertEqual(timeout, 30.0)
+
+    def test_rejects_pushplus_error_response(self):
+        opener = FakeOpener(
+            [FakeResponse(json.dumps({"code": 500, "msg": "bad token"}))]
+        )
+
+        with self.assertRaisesRegex(NotificationError, "bad token"):
+            send_pushplus("push-token", "标题", "正文", opener=opener)
 
 
 if __name__ == "__main__":
