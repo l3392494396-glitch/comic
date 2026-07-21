@@ -1,10 +1,12 @@
 import json
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from curl_cffi import requests as curl_requests
+from curl_cffi.const import CurlOpt
 
 from checkin import (
     CheckinError,
@@ -15,6 +17,7 @@ from checkin import (
     NotificationError,
     TaskProgress,
     VerificationError,
+    _dns_override_for_intercepted_host,
     _find_login_form_action,
     _load_local_env,
     parse_task_progress,
@@ -109,14 +112,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.username, "alice")
         self.assertEqual(config.password, "secret-value")
         self.assertIsNone(config.cookie)
-        self.assertEqual(config.base_url, "https://jmcomic-zzz.one")
+        self.assertEqual(config.base_url, "https://18comic.ink")
 
     def test_keeps_cookie_login_as_compatibility_mode(self):
         config = Config.from_env(
             {"JM_USERNAME": "alice", "JM_COOKIE": "session-value"}
         )
         self.assertEqual(config.cookie, "AVS=session-value")
-        self.assertEqual(config.base_url, "https://jmcomic-zzz.one")
+        self.assertEqual(config.base_url, "https://18comic.ink")
 
     def test_password_mode_ignores_old_cookie_value(self):
         config = Config.from_env(
@@ -154,15 +157,15 @@ class ConfigTests(unittest.TestCase):
                 {"JM_USERNAME": "alice", "JM_COOKIE": "value\r\nevil=1"}
             )
 
-    def test_rejects_non_https_base_url(self):
-        with self.assertRaises(ConfigError):
-            Config.from_env(
-                {
-                    "JM_USERNAME": "alice",
-                    "JM_COOKIE": "session-value",
-                    "JM_BASE_URL": "http://example.com",
-                }
-            )
+    def test_ignores_old_base_url_override(self):
+        config = Config.from_env(
+            {
+                "JM_USERNAME": "alice",
+                "JM_COOKIE": "session-value",
+                "JM_BASE_URL": "https://18comic.vip",
+            }
+        )
+        self.assertEqual(config.base_url, "https://18comic.ink")
 
 
 class ParserTests(unittest.TestCase):
@@ -196,6 +199,41 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(_find_login_form_action(html), "/login")
 
 
+class DnsRepairTests(unittest.TestCase):
+    def test_recovers_cloudflare_ipv4_only_for_known_intercept(self):
+        def fake_getaddrinfo(hostname, port, *, family, type):
+            self.assertEqual(hostname, "mirror.example")
+            self.assertEqual(port, 443)
+            self.assertEqual(type, socket.SOCK_STREAM)
+            if family == socket.AF_INET:
+                return [(socket.AF_INET, type, 6, "", ("182.43.124.7", port))]
+            return [
+                (
+                    socket.AF_INET6,
+                    type,
+                    6,
+                    "",
+                    ("2606:4700:3035::6815:5494", port, 0, 0),
+                )
+            ]
+
+        with patch("checkin.socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            result = _dns_override_for_intercepted_host("mirror.example")
+
+        self.assertEqual(result, ["mirror.example:443:104.21.84.148"])
+
+    def test_does_not_override_normal_dns(self):
+        with patch(
+            "checkin.socket.getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("104.21.1.2", 443))
+            ],
+        ):
+            result = _dns_override_for_intercepted_host("normal.example")
+
+        self.assertEqual(result, [])
+
+
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.config = Config(username="alice", cookie="AVS=session-value")
@@ -208,6 +246,25 @@ class ClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CheckinError, "GitHub Actions"):
             client.fetch_tasks("coin")
+
+    def test_applies_validated_dns_override_to_curl(self):
+        session = FakeSession(
+            [FakeResponse(ParserTests.HTML, url="https://mirror.example/tasks")]
+        )
+        client = ComicClient(
+            self.config,
+            session=session,
+            dns_resolver=lambda hostname: [
+                f"{hostname}:443:104.21.84.148"
+            ],
+        )
+
+        client._request("https://mirror.example/tasks")
+
+        self.assertEqual(
+            session.curl_options[CurlOpt.RESOLVE],
+            ["mirror.example:443:104.21.84.148"],
+        )
 
     def test_follows_https_cross_domain_redirect_with_cookie(self):
         redirect = FakeResponse(
@@ -355,7 +412,7 @@ class ClientTests(unittest.TestCase):
 
         method, url, kwargs = session.requests[0]
         self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://jmcomic-zzz.one/ajax/user_daily_sign")
+        self.assertEqual(url, "https://18comic.ink/ajax/user_daily_sign")
         self.assertEqual(kwargs["headers"]["Cookie"], "AVS=session-value")
         self.assertEqual(kwargs["headers"]["X-Requested-With"], "XMLHttpRequest")
         self.assertEqual(result, DailySignResult(True, "签到成功，获得奖励"))

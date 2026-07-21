@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
+import socket
 import ssl
 import sys
 from dataclasses import dataclass, field
@@ -16,11 +18,17 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import HTTPSHandler, Request, build_opener
 
 from curl_cffi import requests as curl_requests
+from curl_cffi.const import CurlOpt
 
 
-DEFAULT_BASE_URL = "https://jmcomic-zzz.one"
+DEFAULT_BASE_URL = "https://18comic.ink"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_REDIRECTS = 8
+KNOWN_INTERCEPT_IPS = {ipaddress.ip_address("182.43.124.7")}
+CLOUDFLARE_IPV4_NETWORKS = (
+    ipaddress.ip_network("104.16.0.0/13"),
+    ipaddress.ip_network("172.64.0.0/13"),
+)
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -94,6 +102,50 @@ def _build_avs_cookie(raw_value: str) -> str:
     return f"AVS={value}"
 
 
+def _dns_override_for_intercepted_host(hostname: str) -> list[str]:
+    """Recover a Cloudflare IPv4 from AAAA only when local A DNS is intercepted."""
+    try:
+        ipv4_values = {
+            ipaddress.ip_address(info[4][0])
+            for info in socket.getaddrinfo(
+                hostname,
+                443,
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except (OSError, ValueError):
+        return []
+    if not (ipv4_values & KNOWN_INTERCEPT_IPS):
+        return []
+
+    try:
+        ipv6_values = {
+            ipaddress.ip_address(info[4][0])
+            for info in socket.getaddrinfo(
+                hostname,
+                443,
+                family=socket.AF_INET6,
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except (OSError, ValueError):
+        return []
+
+    recovered = set()
+    for ipv6 in ipv6_values:
+        if not isinstance(ipv6, ipaddress.IPv6Address):
+            continue
+        candidate = ipaddress.IPv4Address(int(ipv6) & 0xFFFFFFFF)
+        if any(candidate in network for network in CLOUDFLARE_IPV4_NETWORKS):
+            recovered.add(candidate)
+    if not recovered:
+        return []
+
+    preferred = min(recovered, key=int)
+    return [f"{hostname}:443:{preferred}"]
+
+
 @dataclass(frozen=True)
 class Config:
     username: str
@@ -108,7 +160,7 @@ class Config:
         username = values.get("JM_USERNAME", "").strip()
         password = values.get("JM_PASSWORD", "").strip()
         raw_cookie = values.get("JM_COOKIE", "").strip()
-        base_url = values.get("JM_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/")
+        base_url = DEFAULT_BASE_URL
 
         if not username:
             raise ConfigError("缺少环境变量 JM_USERNAME")
@@ -307,11 +359,22 @@ def _find_login_form_action(page_html: str) -> str | None:
 
 
 class ComicClient:
-    def __init__(self, config: Config, session=None) -> None:
+    def __init__(self, config: Config, session=None, dns_resolver=None) -> None:
         self.config = config
-        self.session = session or curl_requests.Session(impersonate="chrome")
+        self.session = session or curl_requests.Session(
+            impersonate="chrome",
+            trust_env=False,
+        )
+        if dns_resolver is not None:
+            self.dns_resolver = dns_resolver
+        elif session is None:
+            self.dns_resolver = _dns_override_for_intercepted_host
+        else:
+            # Injected sessions are used by tests and do not need local DNS access.
+            self.dns_resolver = lambda hostname: []
         self.cookie = config.cookie or ""
         self.base_url = config.base_url
+        self._reported_dns_repair = False
 
     def _request(
         self,
@@ -338,6 +401,19 @@ class ComicClient:
                 headers["Cookie"] = self.cookie
             if extra_headers:
                 headers.update(extra_headers)
+
+            hostname = urlparse(url).hostname or ""
+            resolve_entries = self.dns_resolver(hostname) if hostname else []
+            if resolve_entries:
+                self.session.curl_options = {CurlOpt.RESOLVE: resolve_entries}
+                if not self._reported_dns_repair:
+                    print(
+                        "提示：检测到异常 DNS，已使用通过 HTTPS 证书校验的"
+                        " Cloudflare 地址直连（未使用代理）"
+                    )
+                    self._reported_dns_repair = True
+            else:
+                self.session.curl_options = {}
 
             try:
                 response = self.session.request(
@@ -470,7 +546,7 @@ class ComicClient:
         action = _find_login_form_action(login_page.body)
         if action is None:
             raise VerificationError(
-                "登录页没有出现账号密码表单，可能遇到 Cloudflare 验证或站点临时页面"
+                "登录页没有出现账号密码表单，可能遇到 Cloudflare 或地区拦截"
             )
 
         login_url = urljoin(login_page.url, action or "/login")
