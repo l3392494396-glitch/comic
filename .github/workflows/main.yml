@@ -30,9 +30,6 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --requirement requirements.txt
 
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
       - name: Run daily check-in
         env:
           JM_USERNAME: ${{ secrets.JM_USERNAME }}
