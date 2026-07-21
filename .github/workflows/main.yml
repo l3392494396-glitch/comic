@@ -36,8 +36,8 @@ jobs:
       - name: Run daily check-in
         env:
           JM_USERNAME: ${{ secrets.JM_USERNAME }}
-          JM_COOKIE: ${{ secrets.JM_COOKIE }}
+          JM_PASSWORD: ${{ secrets.JM_PASSWORD }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          JM_BASE_URL: ${{ vars.JM_BASE_URL || 'https://18comic.ink' }}
+          JM_BASE_URL: ${{ vars.JM_BASE_URL || 'https://jmcomic-zzz.one' }}
           PYTHONUNBUFFERED: "1"
         run: python checkin.py
