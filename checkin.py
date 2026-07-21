@@ -7,15 +7,13 @@ import ipaddress
 import os
 import re
 import socket
-import ssl
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from typing import Mapping, MutableMapping
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
-from urllib.request import HTTPSHandler, Request, build_opener
 
 from curl_cffi import requests as curl_requests
 from curl_cffi.const import CurlOpt
@@ -30,10 +28,7 @@ CLOUDFLARE_IPV4_NETWORKS = (
     ipaddress.ip_network("172.64.0.0/13"),
 )
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/138.0 Safari/537.36"
-)
+CHINA_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _load_local_env(
@@ -225,59 +220,69 @@ def send_pushplus(
     content: str,
     *,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    opener=None,
+    session=None,
 ) -> str:
-    """Submit a Markdown notification to PushPlus and return its message ID."""
-    if not token.strip():
+    """Send a Markdown message with PushPlus' official JSON API."""
+    clean_token = token.strip()
+    if not clean_token:
         raise NotificationError("缺少环境变量 PUSHPLUS_TOKEN")
 
-    payload = json.dumps(
-        {
-            "token": token.strip(),
-            "title": title,
-            "content": content,
-            "template": "markdown",
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = Request(
-        PUSHPLUS_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json; charset=UTF-8",
-            "User-Agent": USER_AGENT,
-        },
-        method="POST",
-    )
-
-    if opener is None:
-        opener = build_opener(HTTPSHandler(context=ssl.create_default_context()))
+    payload = {
+        "token": clean_token,
+        "title": title,
+        "content": content,
+        "template": "markdown",
+    }
+    if session is None:
+        session = curl_requests.Session(
+            impersonate="chrome",
+            trust_env=False,
+        )
 
     try:
-        with opener.open(request, timeout=timeout) as response:
-            raw_body = response.read()
-            charset = response.headers.get_content_charset() or "utf-8"
-            body = raw_body.decode(charset, errors="replace")
-    except HTTPError as exc:
-        raise NotificationError(f"PushPlus 返回 HTTP {exc.code}") from exc
-    except URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        raise NotificationError(f"无法连接 PushPlus：{reason}") from exc
-    except TimeoutError as exc:
-        raise NotificationError(f"访问 PushPlus 超时（{timeout:g} 秒）") from exc
+        response = session.request(
+            "POST",
+            PUSHPLUS_URL,
+            json=payload,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json; charset=UTF-8",
+                "Origin": "https://www.pushplus.plus",
+                "Referer": "https://www.pushplus.plus/",
+            },
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except curl_requests.RequestsError as exc:
+        raise NotificationError(f"无法连接 PushPlus：{exc}") from exc
+
+    status = int(response.status_code)
+    if 300 <= status < 400:
+        raise NotificationError(f"PushPlus 返回意外重定向 HTTP {status}")
+    if status >= 400:
+        raise NotificationError(f"PushPlus 返回 HTTP {status}")
 
     try:
-        response_payload = json.loads(body)
+        response_payload = json.loads(response.text)
     except json.JSONDecodeError as exc:
         raise NotificationError("PushPlus 没有返回有效的 JSON") from exc
+    if not isinstance(response_payload, dict):
+        raise NotificationError("PushPlus 返回的 JSON 格式不正确")
 
     try:
         code = int(response_payload.get("code", -1))
-    except (AttributeError, TypeError, ValueError):
+    except (TypeError, ValueError):
         code = -1
     if code != 200:
         message = str(response_payload.get("msg", "未知错误"))
-        raise NotificationError(f"PushPlus 拒绝了请求：{message[:300]}")
+        raw_detail = response_payload.get("data")
+        detail = ""
+        if raw_detail not in (None, ""):
+            safe_detail = str(raw_detail).replace(clean_token, "***")[:300]
+            detail = f"；详情={safe_detail}"
+        raise NotificationError(
+            f"PushPlus 拒绝了请求（code={code}）：{message[:300]}{detail}"
+        )
 
     return str(response_payload.get("data", ""))
 
@@ -753,6 +758,27 @@ def _notification_content(
     return "\n".join(lines)
 
 
+def _append_notification_run_marker(
+    content: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Make each notification unique so PushPlus does not reject reruns."""
+    values = os.environ if env is None else env
+    current = now or datetime.now(CHINA_TIMEZONE)
+    current = current.astimezone(CHINA_TIMEZONE)
+    timestamp = current.strftime("%Y-%m-%d %H:%M:%S.%f")
+    run_id = values.get("GITHUB_RUN_ID", "").strip()
+    run_attempt = values.get("GITHUB_RUN_ATTEMPT", "").strip()
+    action_marker = ""
+    if run_id:
+        action_marker = f"；Actions {run_id}"
+        if run_attempt:
+            action_marker += f".{run_attempt}"
+    return f"{content}\n\n---\n运行标识：`{timestamp}{action_marker}`"
+
+
 def main() -> int:
     _load_local_env()
     token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
@@ -791,7 +817,8 @@ def main() -> int:
         exit_code = 1
 
     try:
-        message_id = send_pushplus(token, title, content)
+        notification_content = _append_notification_run_marker(content)
+        message_id = send_pushplus(token, title, notification_content)
         suffix = f"，消息流水号：{message_id}" if message_id else ""
         print(f"PushPlus 推送请求已提交{suffix}")
     except NotificationError as exc:
