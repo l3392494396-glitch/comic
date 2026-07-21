@@ -33,7 +33,7 @@ comic/
 
 1. 进入 `Settings` → `Secrets and variables` → `Actions`。
 2. 新建 Repository secret：`JM_USERNAME`，值为网站用户名；它只用于拼接任务页地址。
-3. 新建 Repository secret：`JM_COOKIE`，值只填写 `AVS=你的新AVS值`。
+3. 新建 Repository secret：`JM_COOKIE`，值只填写 AVS 的值，不要包含 `AVS=` 前缀。
 4. 登录 [PushPlus](https://www.pushplus.plus/)，复制你的用户 Token 或消息 Token。
 5. 新建 Repository secret：`PUSHPLUS_TOKEN`，值为刚复制的 Token。
 6. 进入 `Actions`，选择 `Daily comic check-in`。
@@ -56,7 +56,7 @@ PowerShell：
 cd comic
 python -m unittest discover -s tests -v
 $env:JM_USERNAME = "你的用户名"
-$env:JM_COOKIE = "AVS=你的登录Cookie"
+$env:JM_COOKIE = "你的AVS值"
 $env:PUSHPLUS_TOKEN = "你的 PushPlus Token"
 python checkin.py
 ```

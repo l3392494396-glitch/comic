@@ -64,7 +64,7 @@ class FakeSession:
 class ConfigTests(unittest.TestCase):
     def test_reads_required_values(self):
         config = Config.from_env(
-            {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=session-value"}
+            {"JM_USERNAME": "alice", "JM_COOKIE": "session-value"}
         )
         self.assertEqual(config.username, "alice")
         self.assertEqual(config.cookie, "AVS=session-value")
@@ -74,25 +74,25 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Config.from_env({"JM_USERNAME": "alice"})
 
-    def test_keeps_only_avs_from_full_cookie_header(self):
-        config = Config.from_env(
-            {
-                "JM_USERNAME": "alice",
-                "JM_COOKIE": "theme=light; AVS=session-value; remember=secret",
-            }
-        )
-        self.assertEqual(config.cookie, "AVS=session-value")
-
-    def test_rejects_cookie_without_avs(self):
-        with self.assertRaisesRegex(ConfigError, "AVS"):
+    def test_rejects_avs_prefix(self):
+        with self.assertRaisesRegex(ConfigError, "不要包含 AVS= 前缀"):
             Config.from_env(
-                {"JM_USERNAME": "alice", "JM_COOKIE": "theme=light"}
+                {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=session-value"}
+            )
+
+    def test_rejects_full_cookie_header(self):
+        with self.assertRaisesRegex(ConfigError, "其他 Cookie"):
+            Config.from_env(
+                {
+                    "JM_USERNAME": "alice",
+                    "JM_COOKIE": "theme=light; AVS=session-value",
+                }
             )
 
     def test_rejects_cookie_with_newline(self):
         with self.assertRaisesRegex(ConfigError, "换行符"):
             Config.from_env(
-                {"JM_USERNAME": "alice", "JM_COOKIE": "AVS=value\r\nevil=1"}
+                {"JM_USERNAME": "alice", "JM_COOKIE": "value\r\nevil=1"}
             )
 
     def test_rejects_non_https_base_url(self):
@@ -100,7 +100,7 @@ class ConfigTests(unittest.TestCase):
             Config.from_env(
                 {
                     "JM_USERNAME": "alice",
-                    "JM_COOKIE": "AVS=session-value",
+                    "JM_COOKIE": "session-value",
                     "JM_BASE_URL": "http://example.com",
                 }
             )

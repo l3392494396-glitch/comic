@@ -48,16 +48,19 @@ class NotificationError(CheckinError):
     """Raised when PushPlus does not accept a notification request."""
 
 
-def _normalize_avs_cookie(raw_cookie: str) -> str:
-    """Keep only the authentication cookie and discard tracking/remember data."""
-    if "\r" in raw_cookie or "\n" in raw_cookie:
+def _build_avs_cookie(raw_value: str) -> str:
+    """Build the Cookie header from a bare AVS value."""
+    if "\r" in raw_value or "\n" in raw_value:
         raise ConfigError("JM_COOKIE 不能包含换行符")
 
-    for part in raw_cookie.split(";"):
-        name, separator, value = part.strip().partition("=")
-        if separator and name == "AVS" and value:
-            return f"AVS={value.strip()}"
-    raise ConfigError("JM_COOKIE 中缺少有效的 AVS Cookie")
+    value = raw_value.strip()
+    if not value:
+        raise ConfigError("JM_COOKIE 不能为空")
+    if value.startswith("AVS="):
+        raise ConfigError("JM_COOKIE 只填写 AVS 的值，不要包含 AVS= 前缀")
+    if ";" in value:
+        raise ConfigError("JM_COOKIE 只填写 AVS 的值，不要包含其他 Cookie")
+    return f"AVS={value}"
 
 
 @dataclass(frozen=True)
@@ -78,7 +81,7 @@ class Config:
             raise ConfigError("缺少环境变量 JM_USERNAME")
         if not raw_cookie:
             raise ConfigError("缺少环境变量 JM_COOKIE")
-        cookie = _normalize_avs_cookie(raw_cookie)
+        cookie = _build_avs_cookie(raw_cookie)
 
         parsed = urlparse(base_url)
         if parsed.scheme != "https" or not parsed.netloc:
