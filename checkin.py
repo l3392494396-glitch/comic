@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify 18comic daily-login achievements with an existing login cookie.
+"""Claim and verify 18comic daily check-in rewards with a login cookie.
 
 The cookie is read only from an environment variable so it can be supplied by
 GitHub Actions encrypted secrets. This script never submits an account password
@@ -123,6 +123,16 @@ class TaskProgress:
         return f"{self.current}/{self.total}"
 
 
+@dataclass(frozen=True)
+class DailySignResult:
+    signed_now: bool
+    message: str
+
+    @property
+    def status(self) -> str:
+        return "签到成功" if self.signed_now else "今日已签到"
+
+
 def send_pushplus(
     token: str,
     title: str,
@@ -237,7 +247,13 @@ class ComicClient:
         self.config = config
         self.session = session or curl_requests.Session(impersonate="chrome")
 
-    def _request(self, path: str) -> HttpResult:
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> HttpResult:
         url = urljoin(f"{self.config.base_url}/", path.lstrip("/"))
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -245,10 +261,12 @@ class ComicClient:
             "Referer": f"{self.config.base_url}/",
             "Cookie": self.config.cookie,
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         try:
             response = self.session.request(
-                "GET",
+                method,
                 url,
                 headers=headers,
                 timeout=self.config.timeout,
@@ -275,6 +293,38 @@ class ComicClient:
             raise CheckinError(f"网站返回 HTTP {status}: {url}{suffix}{hint}")
 
         return HttpResult(status=status, url=str(response.url), body=body)
+
+    def sign_daily(self) -> DailySignResult:
+        result = self._request(
+            "/ajax/user_daily_sign",
+            method="POST",
+            extra_headers={
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        )
+        final_path = urlparse(result.url).path.rstrip("/")
+        if final_path == "/login":
+            raise VerificationError("登录态未生效，签到请求被重定向到登录页")
+
+        try:
+            payload = json.loads(result.body)
+        except json.JSONDecodeError as exc:
+            raise VerificationError("每日签到接口没有返回有效的 JSON") from exc
+        if not isinstance(payload, dict):
+            raise VerificationError("每日签到接口返回了未知的数据格式")
+
+        message = str(payload.get("msg", "")).strip()
+        error = str(payload.get("error", "")).strip()
+        if error == "finished":
+            return DailySignResult(signed_now=False, message=message or "今天已经完成签到")
+        if error:
+            details = f"：{message}" if message else ""
+            raise VerificationError(f"每日签到失败（{error}）{details}")
+        if not message:
+            raise VerificationError("每日签到接口未确认成功，登录态可能已失效")
+        return DailySignResult(signed_now=True, message=message)
 
     def fetch_tasks(self, reward_type: str) -> dict[str, TaskProgress]:
         if reward_type not in {"coin", "exp"}:
@@ -303,9 +353,14 @@ def _print_tasks(label: str, tasks: Mapping[str, TaskProgress]) -> None:
         print(f"  {marker} {name}: {progress}")
 
 
-def run(config: Config) -> tuple[dict[str, TaskProgress], dict[str, TaskProgress]]:
+def run(
+    config: Config,
+) -> tuple[DailySignResult, dict[str, TaskProgress], dict[str, TaskProgress]]:
     client = ComicClient(config)
-    print(f"正在使用 Cookie 验证账号：{config.username}")
+    print(f"正在使用 Cookie 为账号签到：{config.username}")
+
+    sign_result = client.sign_daily()
+    print(f"个人中心签到：{sign_result.status}；{sign_result.message}")
 
     coin_tasks = client.fetch_tasks("coin")
     exp_tasks = client.fetch_tasks("exp")
@@ -322,15 +377,23 @@ def run(config: Config) -> tuple[dict[str, TaskProgress], dict[str, TaskProgress
             )
 
     print("每日登录任务已在金币和经验页面完成。")
-    return coin_tasks, exp_tasks
+    return sign_result, coin_tasks, exp_tasks
 
 
 def _notification_content(
     username: str,
+    sign_result: DailySignResult,
     coin_tasks: Mapping[str, TaskProgress],
     exp_tasks: Mapping[str, TaskProgress],
 ) -> str:
-    lines = [f"账号：`{username}`", "", "## 金币任务"]
+    lines = [
+        f"账号：`{username}`",
+        "",
+        "## 个人中心签到",
+        f"- ✅ {sign_result.status}：{sign_result.message}",
+        "",
+        "## 金币任务",
+    ]
     for name, progress in coin_tasks.items():
         marker = "✅" if progress.completed else "▫️"
         lines.append(f"- {marker} {name}：{progress}")
@@ -351,8 +414,13 @@ def main() -> int:
 
     try:
         config = Config.from_env()
-        coin_tasks, exp_tasks = run(config)
-        content = _notification_content(config.username, coin_tasks, exp_tasks)
+        sign_result, coin_tasks, exp_tasks = run(config)
+        content = _notification_content(
+            config.username,
+            sign_result,
+            coin_tasks,
+            exp_tasks,
+        )
     except ConfigError as exc:
         message = f"配置错误：{exc}"
         print(message, file=sys.stderr)

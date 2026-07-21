@@ -6,6 +6,7 @@ from checkin import (
     ComicClient,
     Config,
     ConfigError,
+    DailySignResult,
     NotificationError,
     TaskProgress,
     parse_task_progress,
@@ -158,6 +159,42 @@ class ClientTests(unittest.TestCase):
         _, _, kwargs = session.requests[0]
         self.assertEqual(kwargs["headers"]["Cookie"], "AVS=session-value")
         self.assertTrue(tasks["每日登入"].completed)
+
+    def test_posts_daily_sign_request(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    json.dumps({"msg": "签到成功，获得奖励"}),
+                    url="https://18comic.ink/ajax/user_daily_sign",
+                )
+            ]
+        )
+        client = ComicClient(self.config, session=session)
+
+        result = client.sign_daily()
+
+        method, url, kwargs = session.requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://18comic.ink/ajax/user_daily_sign")
+        self.assertEqual(kwargs["headers"]["Cookie"], "AVS=session-value")
+        self.assertEqual(kwargs["headers"]["X-Requested-With"], "XMLHttpRequest")
+        self.assertEqual(result, DailySignResult(True, "签到成功，获得奖励"))
+
+    def test_treats_finished_daily_sign_as_success(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    json.dumps({"msg": "", "error": "finished"}),
+                    url="https://18comic.ink/ajax/user_daily_sign",
+                )
+            ]
+        )
+        client = ComicClient(self.config, session=session)
+
+        result = client.sign_daily()
+
+        self.assertFalse(result.signed_now)
+        self.assertEqual(result.status, "今日已签到")
 
 
 class PushPlusTests(unittest.TestCase):
