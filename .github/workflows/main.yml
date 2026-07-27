@@ -3,7 +3,7 @@ name: Daily comic check-in
 "on":
   schedule:
     # GitHub cron uses UTC. 16:17 UTC = 00:17 Asia/Shanghai.
-    - cron: "17 16 * * *"
+    - cron: "0 1 * * *"
   workflow_dispatch:
 
 permissions:
