@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,9 +45,26 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python checkin.py
 
-      - name: Auto Keepalive (Prevent 60-day GitHub sleep)
-        uses: gautamkrishnar/keepalive-workflow@v2
-        with:
-          committer_username: github-actions[bot]
-          committer_email: 41898282+github-actions[bot]@users.noreply.github.com
-          commit_message: "chore(ops): monthly automated keepalive [skip ci]"
+      - name: Monthly Keepalive (Prevent 60-day GitHub sleep)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          LAST_COMMIT_TIME=$(git log -1 --format=%ct)
+          CURRENT_TIME=$(date +%s)
+          DAYS_SINCE=$(( (CURRENT_TIME - LAST_COMMIT_TIME) / 86400 ))
+          echo "距上次提交已过去: ${DAYS_SINCE} 天"
+          
+          if [ ${DAYS_SINCE} -ge 40 ] || [ $(date +%d) -eq 01 ] || [ ! -f ".keepalive" ]; then
+            echo "触发自动保活机制，生成月度活跃标记..."
+            date -u +"%Y-%m-%d %H:%M:%S UTC" > .keepalive
+            git add .keepalive
+          fi
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(ops): monthly automated keepalive [skip ci]"
+            git push origin main
+            echo "已成功提交月度保活记录，GitHub 60天定时任务倒计时已重置！"
+          else
+            echo "未达保活阈值，跳过提交。"
+          fi
