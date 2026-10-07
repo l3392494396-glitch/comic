@@ -2,7 +2,7 @@ name: Daily comic check-in
 
 "on":
   schedule:
-    # GitHub cron uses UTC. 16:17 UTC = 00:17 Asia/Shanghai.
+    # GitHub cron uses UTC. 01:00 UTC = 09:00 Asia/Shanghai.
     - cron: "0 1 * * *"
   workflow_dispatch:
 
@@ -33,10 +33,16 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
+      - name: Refresh login state
+        env:
+          JM_USERNAME: ${{ secrets.JM_USERNAME }}
+          JM_PASSWORD: ${{ secrets.JM_PASSWORD }}
+          JM_COOKIE: ${{ secrets.JM_COOKIE }}
+        run: python refresh_login.py
+
       - name: Run daily check-in
         env:
           JM_USERNAME: ${{ secrets.JM_USERNAME }}
-          JM_COOKIE: ${{ secrets.JM_COOKIE }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: python checkin.py
