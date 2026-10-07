@@ -36,7 +36,9 @@ jobs:
       - name: Run daily check-in
         env:
           JM_USERNAME: ${{ secrets.JM_USERNAME }}
+          JM_PASSWORD: ${{ secrets.JM_PASSWORD }}
           JM_COOKIE: ${{ secrets.JM_COOKIE }}
+          JM_BASE_URL: ${{ secrets.JM_BASE_URL }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: python checkin.py

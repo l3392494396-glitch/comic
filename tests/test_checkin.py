@@ -9,6 +9,7 @@ from checkin import (
     MonthlyAction,
     NotificationError,
     TaskProgress,
+    VerificationError,
     parse_monthly_action,
     parse_task_progress,
     send_pushplus,
@@ -56,6 +57,14 @@ class ConfigTests(unittest.TestCase):
             }
         )
         self.assertEqual(config.cookie, "AVS=session-value")
+
+    def test_reads_password_configuration(self):
+        config = Config.from_env(
+            {"JM_USERNAME": "alice", "JM_PASSWORD": "secret_password"}
+        )
+        self.assertEqual(config.username, "alice")
+        self.assertEqual(config.password, "secret_password")
+        self.assertEqual(config.cookie, "")
 
     def test_rejects_missing_cookie(self):
         with self.assertRaises(ConfigError):
@@ -157,6 +166,52 @@ class ClientTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CheckinError, "以外"):
             ComicClient(self.config, session=session).monthly_checkin()
+
+    def test_login_with_password_success(self):
+        config = Config(username="alice", password="secret_password")
+        session = FakeSession(
+            [
+                FakeResponse(
+                    json.dumps({"status": 1, "errors": "login_success"}),
+                    url="https://18comic.ink/login",
+                )
+            ]
+        )
+        session.responses[0].headers = {"set-cookie": "AVS=new_session_avs; path=/"}
+        client = ComicClient(config, session=session)
+        client.login_with_password()
+        self.assertEqual(client.cookie, "AVS=new_session_avs")
+        self.assertEqual(session.requests[0][0], "POST")
+        self.assertEqual(session.requests[0][2]["data"]["username"], "alice")
+        self.assertEqual(session.requests[0][2]["data"]["password"], "secret_password")
+
+    def test_login_with_password_failure(self):
+        config = Config(username="alice", password="wrong_password")
+        session = FakeSession(
+            [
+                FakeResponse(
+                    json.dumps({"status": 2, "errors": ["无效账号/密码"]}),
+                    url="https://18comic.ink/login",
+                )
+            ]
+        )
+        client = ComicClient(config, session=session)
+        with self.assertRaisesRegex(VerificationError, "账号或密码错误"):
+            client.login_with_password()
+
+    def test_login_with_password_frozen(self):
+        config = Config(username="alice", password="secret_password")
+        session = FakeSession(
+            [
+                FakeResponse(
+                    json.dumps({"status": 5, "errors": "账号被锁定"}),
+                    url="https://18comic.ink/login",
+                )
+            ]
+        )
+        client = ComicClient(config, session=session)
+        with self.assertRaisesRegex(VerificationError, "账号被冻结"):
+            client.login_with_password()
 
 
 class PushPlusTests(unittest.TestCase):
