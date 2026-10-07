@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import json
@@ -157,7 +155,9 @@ class Config:
         values = os.environ if env is None else env
         username = values.get("JM_USERNAME", "").strip()
         raw_cookie = values.get("JM_COOKIE", "").strip()
-        base_url = DEFAULT_BASE_URL
+        # 修复：优先从环境变量读取 JM_BASE_URL，若无则使用默认地址
+        raw_base_url = values.get("JM_BASE_URL", "").strip()
+        base_url = raw_base_url or DEFAULT_BASE_URL
 
         if not username:
             raise ConfigError("缺少环境变量 JM_USERNAME")
@@ -484,7 +484,6 @@ class ComicClient:
         elif session is None:
             self.dns_resolver = _dns_override_for_intercepted_host
         else:
-            # Injected sessions are used by tests and do not need local DNS access.
             self.dns_resolver = lambda hostname: []
         self.cookie = config.cookie or ""
         self.base_url = config.base_url
@@ -978,15 +977,19 @@ def main() -> int:
         content = f"账号：`{username}`\n\n{message}"
         exit_code = 1
 
-    try:
-        notification_content = _append_notification_run_marker(content)
-        message_id = send_pushplus(token, title, notification_content)
-        suffix = f"，消息流水号：{message_id}" if message_id else ""
-        print(f"PushPlus 推送请求已提交{suffix}")
-    except NotificationError as exc:
-        print(f"PushPlus 推送失败：{exc}", file=sys.stderr)
-        if exit_code == 0:
-            exit_code = 1
+    # 修复：仅在配置了 PUSHPLUS_TOKEN 时才发送推送，避免未配置时报错将 exit_code 改为 1
+    if token:
+        try:
+            notification_content = _append_notification_run_marker(content)
+            message_id = send_pushplus(token, title, notification_content)
+            suffix = f"，消息流水号：{message_id}" if message_id else ""
+            print(f"PushPlus 推送请求已提交{suffix}")
+        except NotificationError as exc:
+            print(f"PushPlus 推送失败：{exc}", file=sys.stderr)
+            if exit_code == 0:
+                exit_code = 1
+    else:
+        print("提示：未配置 PUSHPLUS_TOKEN，跳过推送通知。")
 
     return exit_code
 
