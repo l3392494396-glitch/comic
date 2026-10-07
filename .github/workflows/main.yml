@@ -7,7 +7,7 @@ name: Daily comic check-in
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: comic-daily-checkin
@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
@@ -42,3 +42,10 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: python checkin.py
+
+      - name: Auto Keepalive (Prevent 60-day GitHub sleep)
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          committer_username: github-actions[bot]
+          committer_email: 41898282+github-actions[bot]@users.noreply.github.com
+          commit_message: "chore(ops): monthly automated keepalive [skip ci]"
